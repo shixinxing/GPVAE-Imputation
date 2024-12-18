@@ -232,8 +232,8 @@ class VAE(tf.keras.Model):
     def _get_prior(self):
         if self.prior is None:
             self.prior = tfd.MultivariateNormalDiag(
-                loc=tf.zeros(self.latent_dim, self.time_length, dtype=tf.float32),
-                scale_diag=tf.ones(self.latent_dim, self.time_length, dtype=tf.float32))
+                loc=tf.zeros([self.latent_dim, self.time_length], dtype=tf.float32),
+                scale_diag=tf.ones([self.latent_dim, self.time_length], dtype=tf.float32))
         return self.prior
 
     def compute_nll(self, x, y=None, m_mask=None):
