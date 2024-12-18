@@ -120,7 +120,7 @@ def main(argv):
                        kernel=FLAGS.kernel, sigma=FLAGS.sigma,
                        length_scale=FLAGS.length_scale, kernel_scales=FLAGS.kernel_scales,
                        image_preprocessor=image_preprocessor, window_size=FLAGS.window_size,
-                       beta=FLAGS.beta, M=FLAGS.M, K=FLAGS.K, data_type=FLAGS.data_type)
+                       beta=FLAGS.beta, M=FLAGS.M, K=FLAGS.K)
     else:
         raise ValueError("Model type must be one of ['vae', 'hi-vae', 'gp-vae']")
 
@@ -204,7 +204,9 @@ def main(argv):
         [model.compute_nll(x, y=y, m_mask=m).numpy() for x, y, m in get_val_batches()]) / n_missings
     mse_miss = np.sum(
         [model.compute_mse(x, y=y, m_mask=m, binary=True).numpy() for x, y, m in get_val_batches()]) / n_missings
-    print("NLL miss: {:.6f}".format(nll_miss), "\tMSE miss: {:.6f}".format(mse_miss))
+    mse_miss_not_round = np.sum(
+        [model.compute_mse(x, y=y, m_mask=m, binary=False).numpy() for x, y, m in get_val_batches()]) / n_missings
+    print(f"NLL miss: {nll_miss:.6f},\tMSE miss: {mse_miss:.6f}, \tMSE not rounded: {mse_miss_not_round:.6f}")
 
     # Save imputed values
     z_mean = [model.encode(x_batch).mean().numpy() for x_batch in x_val_miss_batches]
