@@ -12,7 +12,6 @@ import tensorflow as tf
 
 
 # Encoders
-
 class DiagonalEncoder(tf.keras.Model):
     def __init__(self, z_size, hidden_sizes=(64, 64), **kwargs):
         """ Encoder with factorized Normal posterior over temporal dimension
@@ -23,13 +22,16 @@ class DiagonalEncoder(tf.keras.Model):
         """
         super(DiagonalEncoder, self).__init__()
         self.z_size = int(z_size)
-        self.net = make_nn(2*z_size, hidden_sizes)
+        self.net = make_nn(2*z_size, hidden_sizes)  # NN: [hidden_sizes] + 2*z_size
 
     def __call__(self, x):
         mapped = self.net(x)
+        num_dim = len(x.shape.as_list())
+        perm = list(range(num_dim - 2)) + [num_dim - 1, num_dim - 2]
+        mapped = tf.transpose(mapped, perm=perm)
         return tfd.MultivariateNormalDiag(
-          loc=mapped[..., :self.z_size],
-          scale_diag=tf.nn.softplus(mapped[..., self.z_size:]))
+            loc=mapped[..., :self.z_size, :], scale_diag=tf.nn.softplus(mapped[..., self.z_size:, :])
+        )
 
 
 class JointEncoder(tf.keras.Model):
@@ -44,7 +46,7 @@ class JointEncoder(tf.keras.Model):
         """
         super(JointEncoder, self).__init__()
         self.z_size = int(z_size)
-        self.net = make_cnn(2*z_size, hidden_sizes, window_size)
+        self.net = make_cnn(2*z_size, hidden_sizes, window_size)  # ⚠️这里使用conv1D 而非2D
         self.transpose = transpose
 
     def __call__(self, x):
@@ -92,11 +94,7 @@ class BandedJointEncoder(tf.keras.Model):
         mapped_covar = mapped_transposed[:, self.z_size:]
 
         # tf.nn.sigmoid provides more stable performance on Physionet dataset
-        if self.data_type == 'physionet':
-            mapped_covar = tf.nn.sigmoid(mapped_covar)
-        else:
-            mapped_covar = tf.nn.softplus(mapped_covar)
-
+        mapped_covar = tf.nn.softplus(mapped_covar)
         mapped_reshaped = tf.reshape(mapped_covar, [batch_size, self.z_size, 2*time_length])
 
         dense_shape = [batch_size, self.z_size, time_length, time_length]
@@ -111,22 +109,21 @@ class BandedJointEncoder(tf.keras.Model):
             # Obtain covariance matrix from precision one
             mapped_values = tf.reshape(mapped_reshaped[:, :, :-1], [-1])
             prec_sparse = tf.sparse.SparseTensor(indices=idxs_all, values=mapped_values, dense_shape=dense_shape)
-            prec_sparse = tf.sparse.reorder(prec_sparse)
+            prec_sparse = tf.sparse.reorder(prec_sparse)  # 确保稀疏张量的元素按行优先顺序进行排序，因为稀疏张量在很多操作中要求其元素按索引顺序排列。
             prec_tril = tf.sparse_add(tf.zeros(prec_sparse.dense_shape, dtype=tf.float32), prec_sparse)
             eye = tf.eye(num_rows=prec_tril.shape.as_list()[-1], batch_shape=prec_tril.shape.as_list()[:-2])
-            prec_tril = prec_tril + eye
+            prec_tril = prec_tril + eye  # 此步骤确保精度矩阵的对角线元素至少为 1，从而增加矩阵的数值稳定性。
             cov_tril = tf.linalg.triangular_solve(matrix=prec_tril, rhs=eye, lower=False)
             cov_tril = tf.where(tf.math.is_finite(cov_tril), cov_tril, tf.zeros_like(cov_tril))
 
         num_dim = len(cov_tril.shape)
         perm = list(range(num_dim - 2)) + [num_dim - 1, num_dim - 2]
         cov_tril_lower = tf.transpose(cov_tril, perm=perm)
-        z_dist = tfd.MultivariateNormalTriL(loc=mapped_mean, scale_tril=cov_tril_lower)
+        z_dist = tfd.MultivariateNormalTriL(loc=mapped_mean, scale_tril=cov_tril_lower)  # ⚠️这里cholesky是个满元素的下三角矩阵
         return z_dist
 
 
 # Decoders
-
 class Decoder(tf.keras.Model):
     def __init__(self, output_size, hidden_sizes=(64, 64)):
         """ Decoder parent class with no specified output distribution
@@ -145,19 +142,18 @@ class BernoulliDecoder(Decoder):
     """ Decoder with Bernoulli output distribution (used for HMNIST) """
     def __call__(self, x):
         mapped = self.net(x)
-        return tfd.Bernoulli(logits=mapped)
+        return tfd.Bernoulli(logits=mapped)   # use sigmoid(logits)
 
 
 class GaussianDecoder(Decoder):
     """ Decoder with Gaussian output distribution (used for SPRITES and Physionet) """
     def __call__(self, x):
         mean = self.net(x)
-        var = tf.ones(tf.shape(mean), dtype=tf.float32)
+        var = tf.ones(tf.shape(mean), dtype=tf.float32)  # ⚠️这里自己指定了var=1
         return tfd.Normal(loc=mean, scale=var)
 
 
 # Image preprocessor
-
 class ImagePreprocessor(tf.keras.Model):
     def __init__(self, image_shape, hidden_sizes=(256, ), kernel_size=3.):
         """ Decoder parent class without specified output distribution
@@ -167,15 +163,14 @@ class ImagePreprocessor(tf.keras.Model):
             :param kernel_size: kernel/filter width and height
         """
         super(ImagePreprocessor, self).__init__()
-        self.image_shape = image_shape
-        self.net = make_2d_cnn(image_shape[-1], hidden_sizes, kernel_size)
+        self.image_shape = image_shape   # [28,28,1]
+        self.net = make_2d_cnn(image_shape[-1], hidden_sizes, kernel_size)  # outputsize=1, hidden_size=256，使用conv2D 而非 1D
 
     def __call__(self, x):
         return self.net(x)
 
 
 # VAE models
-
 class VAE(tf.keras.Model):
     def __init__(self, latent_dim, data_dim, time_length,
                  encoder_sizes=(64, 64), encoder=DiagonalEncoder,
@@ -183,8 +178,9 @@ class VAE(tf.keras.Model):
                  image_preprocessor=None, beta=1.0, M=1, K=1, **kwargs):
         """ Basic Variational Autoencoder with Standard Normal prior
             :param latent_dim: latent space dimensionality
-            :param data_dim: original data dimensionality
+            :param data_dim: original data dimensionality  # 为784
             :param time_length: time series duration
+            # 数据shape为：[batch_size, time_length, data_dim]
             
             :param encoder_sizes: layer sizes for the encoder network
             :param encoder: encoder model class {Diagonal, Joint, BandedJoint}Encoder
@@ -197,23 +193,22 @@ class VAE(tf.keras.Model):
             :param K: number of importance weights for IWAE model (see: https://arxiv.org/abs/1509.00519)
         """
         super(VAE, self).__init__()
-        self.latent_dim = latent_dim
-        self.data_dim = data_dim
-        self.time_length = time_length
+        self.latent_dim, self.data_dim, self.time_length = latent_dim, data_dim, time_length
 
         self.encoder = encoder(latent_dim, encoder_sizes, **kwargs)
         self.decoder = decoder(data_dim, decoder_sizes)
         self.preprocessor = image_preprocessor
+        self.prior = None   # 自己补上的
 
         self.beta = beta
         self.K = K
         self.M = M
 
     def encode(self, x):
-        x = tf.identity(x)  # in case x is not a Tensor already...
+        x = tf.identity(x)  # in case x is not a Tensor already...   #[1,10,784]
         if self.preprocessor is not None:
             x_shape = x.shape.as_list()
-            new_shape = [x_shape[0] * x_shape[1]] + list(self.preprocessor.image_shape)
+            new_shape = [x_shape[0] * x_shape[1]] + list(self.preprocessor.image_shape)  # [10,28,28,1]
             x_reshaped = tf.reshape(x, new_shape)
             x_preprocessed = self.preprocessor(x_reshaped)
             x = tf.reshape(x_preprocessed, x_shape)
@@ -221,7 +216,10 @@ class VAE(tf.keras.Model):
 
     def decode(self, z):
         z = tf.identity(z)  # in case z is not a Tensor already...
-        return self.decoder(z)
+        num_dim = len(z.shape)
+        assert num_dim > 2
+        perm = list(range(num_dim - 2)) + [num_dim - 1, num_dim - 2]
+        return self.decoder(tf.transpose(z, perm=perm))
 
     def __call__(self, inputs):
         return self.decode(self.encode(inputs).sample()).sample()
@@ -233,14 +231,15 @@ class VAE(tf.keras.Model):
     
     def _get_prior(self):
         if self.prior is None:
-            self.prior = tfd.MultivariateNormalDiag(loc=tf.zeros(self.latent_dim, dtype=tf.float32),
-                                                    scale_diag=tf.ones(self.latent_dim, dtype=tf.float32))
+            self.prior = tfd.MultivariateNormalDiag(
+                loc=tf.zeros(self.latent_dim, self.time_length, dtype=tf.float32),
+                scale_diag=tf.ones(self.latent_dim, self.time_length, dtype=tf.float32))
         return self.prior
 
     def compute_nll(self, x, y=None, m_mask=None):
         # Used only for evaluation
         assert len(x.shape) == 3, "Input should have shape: [batch_size, time_length, data_dim]"
-        if y is None: y = x
+        y = x if y is None else y
 
         z_sample = self.encode(x).sample()
         x_hat_dist = self.decode(z_sample)
@@ -254,12 +253,12 @@ class VAE(tf.keras.Model):
     def compute_mse(self, x, y=None, m_mask=None, binary=False):
         # Used only for evaluation
         assert len(x.shape) == 3, "Input should have shape: [batch_size, time_length, data_dim]"
-        if y is None: y = x
+        y = x if y is None else y
 
-        z_mean = self.encode(x).mean()
+        z_mean = self.encode(x).mean()           # through mean
         x_hat_mean = self.decode(z_mean).mean()  # shape=(BS, TL, D)
-        if binary:
-            x_hat_mean = tf.round(x_hat_mean)
+        if binary:  # when hminst it's true
+            x_hat_mean = tf.round(x_hat_mean)    # 转化为最近的整数
         mse = tf.math.squared_difference(x_hat_mean, y)
         if m_mask is not None:
             m_mask = tf.cast(m_mask, tf.bool)
@@ -276,14 +275,14 @@ class VAE(tf.keras.Model):
             m_mask = tf.tile(m_mask, [self.M * self.K, 1, 1])  # shape=(M*K*BS, TL, D)
             m_mask = tf.cast(m_mask, tf.bool)
 
-        pz = self._get_prior()
+        pz = self._get_prior()  # p(z)
         qz_x = self.encode(x)
-        z = qz_x.sample()
+        z = qz_x.sample()    # ⚠️这里似乎不需要基于整个MVN采样，实际我们只关心covar的对角线
         px_z = self.decode(z)
 
         nll = -px_z.log_prob(x)  # shape=(M*K*BS, TL, D)
-        nll = tf.where(tf.math.is_finite(nll), nll, tf.zeros_like(nll))
-        if m_mask is not None:
+        nll = tf.where(tf.math.is_finite(nll), nll, tf.zeros_like(nll))  # 基本不会出现infinite的值
+        if m_mask is not None:  # mask中为1的位置是未观测到的
             nll = tf.where(m_mask, tf.zeros_like(nll), nll)  # if not HI-VAE, m_mask is always zeros
         nll = tf.reduce_sum(nll, [1, 2])  # shape=(M*K*BS)
 
@@ -297,14 +296,13 @@ class VAE(tf.keras.Model):
 
             elbo = reduce_logmeanexp(weights, axis=1)  # shape=(M, 1, BS)
             elbo = tf.reduce_mean(elbo)  # scalar
-        else:
-            # if K==1, compute KL analytically
+        else:  # if K==1, compute KL analytically
             kl = self.kl_divergence(qz_x, pz)  # shape=(M*K*BS, TL or d)
             kl = tf.where(tf.math.is_finite(kl), kl, tf.zeros_like(kl))
             kl = tf.reduce_sum(kl, 1)  # shape=(M*K*BS)
 
             elbo = -nll - self.beta * kl  # shape=(M*K*BS) K=1
-            elbo = tf.reduce_mean(elbo)  # scalar
+            elbo = tf.reduce_mean(elbo)  # scalar, averaged over video dim
 
         if return_parts:
             nll = tf.reduce_mean(nll)  # scalar
@@ -315,12 +313,12 @@ class VAE(tf.keras.Model):
 
     def compute_loss(self, x, m_mask=None, return_parts=False):
         del m_mask
-        return self._compute_loss(x, return_parts=return_parts)
+        return self._compute_loss(x, return_parts=return_parts)  # VAE的elbo没有mask，而HI-VAE是有的
 
     def kl_divergence(self, a, b):
         return tfd.kl_divergence(a, b)
 
-    def get_trainable_vars(self):
+    def get_trainable_vars(self):  # 用于model初始化
         self.compute_loss(tf.random.normal(shape=(1, self.time_length, self.data_dim), dtype=tf.float32),
                           tf.zeros(shape=(1, self.time_length, self.data_dim), dtype=tf.float32))
         return self.trainable_variables
@@ -354,7 +352,7 @@ class GP_VAE(HI_VAE):
         self.pz_scale_log_abs_determinant = None
         self.prior = None
 
-    def decode(self, z):
+    def decode(self, z):  # override
         num_dim = len(z.shape)
         assert num_dim > 2
         perm = list(range(num_dim - 2)) + [num_dim - 1, num_dim - 2]
@@ -384,10 +382,10 @@ class GP_VAE(HI_VAE):
                     multiplier = int(np.ceil(self.latent_dim / self.kernel_scales))
                     total += multiplier
                 tiled_matrices.append(tf.tile(tf.expand_dims(kernel_matrices[i], 0), [multiplier, 1, 1]))
-            kernel_matrix_tiled = np.concatenate(tiled_matrices)
+            kernel_matrix_tiled = np.concatenate(tiled_matrices)   # [35,10,10]
             assert len(kernel_matrix_tiled) == self.latent_dim
 
-            self.prior = tfd.MultivariateNormalFullCovariance(
+            self.prior = tfd.MultivariateNormalFullCovariance(   # 实际上是一个block diag MOGP
                 loc=tf.zeros([self.latent_dim, self.time_length], dtype=tf.float32),
                 covariance_matrix=kernel_matrix_tiled)
         return self.prior
@@ -431,8 +429,12 @@ class GP_VAE(HI_VAE):
 
         # ~10x times faster on CPU then on GPU
         with tf.device('/cpu:0'):
-            kl_div = (self.pz_scale_log_abs_determinant - a.scale.log_abs_determinant() +
-                      0.5 * (-tf.cast(a.scale.domain_dimension_tensor(), a.dtype) +
-                      squared_frobenius_norm(b_inv_a) + squared_frobenius_norm(
-                      b.scale.solve((b.mean() - a.mean())[..., tf.newaxis]))))
+            kl_div = (
+                    self.pz_scale_log_abs_determinant - a.scale.log_abs_determinant() +  # 这里的scale类似covar的L
+                    0.5 * (
+                            -tf.cast(a.scale.domain_dimension_tensor(), a.dtype)
+                            + squared_frobenius_norm(b_inv_a)
+                            + squared_frobenius_norm(b.scale.solve((b.mean() - a.mean())[..., tf.newaxis]))
+                    )
+            )
         return kl_div
