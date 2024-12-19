@@ -69,19 +69,22 @@ class VAE(tf.keras.Model):
                 scale_diag=tf.ones([self.latent_dim, self.time_length], dtype=tf.float32))
         return self.prior
 
-    def compute_nll(self, x, y=None, m_mask=None):
+    def compute_nll(self, x, y=None, m_mask=None, num_samples=1):  # 多次采样估计
         # Used only for evaluation
         assert len(x.shape) == 3, "Input should have shape: [batch_size, time_length, data_dim]"
         y = x if y is None else y
-
-        z_sample = self.encode(x).sample()
-        x_hat_dist = self.decode(z_sample)
-        nll = -x_hat_dist.log_prob(y)  # shape=(BS, TL, D)
-        nll = tf.where(tf.math.is_finite(nll), nll, tf.zeros_like(nll))
-        if m_mask is not None:
-            m_mask = tf.cast(m_mask, tf.bool)
-            nll = tf.where(m_mask, nll, tf.zeros_like(nll))  # !!! inverse mask, set zeros for observed
-        return tf.reduce_sum(nll)
+        nlls_coll = []
+        for _ in range(num_samples):
+            z_sample = self.encode(x).sample()
+            x_hat_dist = self.decode(z_sample)
+            nll = -x_hat_dist.log_prob(y)  # shape=(BS, TL, D)
+            nll = tf.where(tf.math.is_finite(nll), nll, tf.zeros_like(nll))
+            if m_mask is not None:
+                m_mask = tf.cast(m_mask, tf.bool)
+                nll = tf.where(m_mask, nll, tf.zeros_like(nll))  # !!! inverse mask, set zeros for observed
+            nlls_coll.append(tf.reduce_sum(nll))
+        nlls_coll = tf.stack(nlls_coll)  # [num_samples, ]
+        return - tf.math.log(tf.cast(num_samples, tf.float32)) + tf.reduce_logsumexp(nlls_coll)
 
     def compute_mse(self, x, y=None, m_mask=None, binary=False):
         # Used only for evaluation
