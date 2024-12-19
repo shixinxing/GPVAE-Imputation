@@ -63,3 +63,4 @@ def make_2d_cnn(output_size, hidden_sizes, kernel_size=3):
                                      activation=tf.nn.relu, dtype=tf.float32)
               for h in hidden_sizes + [output_size]]
     return tf.keras.Sequential(layers)
+
