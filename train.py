@@ -8,6 +8,7 @@ from absl import app
 from absl import flags
 
 from lib.models import *
+from lib.building_blocks import *
 import tensorflow as tf
 
 tf.compat.v1.enable_eager_execution()
@@ -80,15 +81,15 @@ def main(argv):
     x_val_full = data['x_test_full']
     x_val_miss = data['x_test_miss']
     m_val_miss = data['m_test_miss']
-    y_val = data['y_test']
+    # y_val = data['y_test']
 
     tf_x_train_miss = tf.data.Dataset.from_tensor_slices((x_train_miss, m_train_miss))\
                                      .shuffle(len(x_train_miss)).batch(FLAGS.batch_size).repeat()
     tf_x_val_miss = tf.data.Dataset.from_tensor_slices((x_val_miss, m_val_miss)).batch(FLAGS.batch_size).repeat()
-    tf_x_val_miss = tf.compat.v1.data.make_one_shot_iterator(tf_x_val_miss)
+    # tf_x_val_miss = tf.compat.v1.data.make_one_shot_iterator(tf_x_val_miss)
 
     # Build Conv2D preprocessor for image data
-    print("Using CNN preprocessor in the encoder\n")
+    print("Using CNN preprocessor in the encoder!\n")
     image_preprocessor = ImagePreprocessor(img_shape, FLAGS.cnn_sizes, FLAGS.cnn_kernel_size)
 
     ###############
@@ -114,6 +115,7 @@ def main(argv):
             encoder = JointEncoder
         else:
             encoder = DiagonalEncoder
+        print(f"Using {encoder.__class__.__name__} as encoder!")
         model = GP_VAE(latent_dim=FLAGS.latent_dim, data_dim=data_dim, time_length=time_length,
                        encoder_sizes=FLAGS.encoder_sizes, encoder=encoder,
                        decoder_sizes=FLAGS.decoder_sizes, decoder=decoder,
@@ -205,8 +207,10 @@ def main(argv):
     mse_miss = np.sum(
         [model.compute_mse(x, y=y, m_mask=m, binary=True).numpy() for x, y, m in get_val_batches()]) / n_missings
     mse_miss_not_round = np.sum(
-        [model.compute_mse(x, y=y, m_mask=m, binary=False).numpy() for x, y, m in get_val_batches()]) / n_missings
-    print(f"NLL miss: {nll_miss:.6f},\tMSE miss: {mse_miss:.6f}, \tMSE not rounded: {mse_miss_not_round:.6f}")
+        [model.compute_mse(x, y=y, m_mask=None, binary=False).numpy() for x, y, m in get_val_batches()]) / n_missings
+    print(f"NLL miss: {nll_miss:.6f},"
+          f"\tMSE rounded at missing pixels: {mse_miss:.6f}, "
+          f"\tMSE not rounded at all pixels: {mse_miss_not_round:.6f}")
 
     # Save imputed values
     z_mean = [model.encode(x_batch).mean().numpy() for x_batch in x_val_miss_batches]
