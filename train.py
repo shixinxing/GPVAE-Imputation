@@ -6,6 +6,7 @@ from matplotlib import pyplot as plt
 import warnings
 from absl import app
 from absl import flags
+import pickle
 
 from lib.models import *
 from lib.building_blocks import *
@@ -203,25 +204,32 @@ def main(argv):
     # Compute NLL and MSE on missing values
     n_missings = m_val_miss.sum()
     nll_miss = np.sum(
-        [model.compute_nll(x, y=y, m_mask=m).numpy() for x, y, m in get_val_batches()]) / n_missings
+        [model.compute_nll(x, y=y, m_mask=m, num_samples=20).numpy() for x, y, m in get_val_batches()]) / n_missings
     mse_miss = np.sum(
         [model.compute_mse(x, y=y, m_mask=m, binary=True).numpy() for x, y, m in get_val_batches()]) / n_missings
     mse_miss_not_round = np.sum(
-        [model.compute_mse(x, y=y, m_mask=None, binary=False).numpy() for x, y, m in get_val_batches()]) / n_missings
-    print(f"NLL miss: {nll_miss:.6f},"
-          f"\tMSE rounded at missing pixels: {mse_miss:.6f}, "
-          f"\tMSE not rounded at all pixels: {mse_miss_not_round:.6f}")
+        [model.compute_mse(x, y=y, m_mask=None, binary=False).numpy() for x, y, m in get_val_batches()]
+    ) / x_val_full.size
+    print(f"NLL miss: {nll_miss},"
+          f"\tMSE rounded at missing pixels: {mse_miss}, "
+          f"\tMSE not rounded at all pixels: {mse_miss_not_round}")
 
     # Save imputed values
-    z_mean = [model.encode(x_batch).mean().numpy() for x_batch in x_val_miss_batches]
-    x_val_imputed = np.vstack([model.decode(z_batch).mean().numpy() for z_batch in z_mean])
     if FLAGS.save:
-        np.save(os.path.join(full_exp_name, "imputed_no_gt"), x_val_imputed)
+        z_mean = [model.encode(x_batch).mean().numpy() for x_batch in x_val_miss_batches]
+        x_val_imputed = np.vstack([model.decode(z_batch).mean().numpy() for z_batch in z_mean])
 
-    # impute gt observed values
-    x_val_imputed[m_val_miss == 0] = x_val_miss[m_val_miss == 0]
-    if FLAGS.save:
+        # impute gt observed values
+        x_val_imputed_copy = np.copy(x_val_imputed)
+        x_val_imputed_copy[m_val_miss == 0] = x_val_miss[m_val_miss == 0]
         np.save(os.path.join(full_exp_name, "imputed_fill_observed_one"), x_val_imputed)
+        everything_for_imgs = {
+            'y_test_full': x_val_full, 'y_test_miss': x_val_miss, 'y_rec': x_val_imputed,
+            'NLL': nll_miss, 'MSE': mse_miss, 'MSE_non_round': mse_miss_not_round
+        }
+        imgs_pickle_path = os.path.join(full_exp_name, 'everything_for_imgs.pkl')
+        with open(imgs_pickle_path, 'wb') as f:
+            pickle.dump(everything_for_imgs, f)
 
     # Visualize reconstructions
     img_index, num_imgs = 0, 10
@@ -231,7 +239,7 @@ def main(argv):
 
     for i in range(num_imgs):
         axes[0, i].imshow(x_val_miss[img_index, i].reshape(28, 28), cmap='gray')
-        axes[1, i].imshow(x_hat[img_index, i].reshape(28, 28), cmap='gray')
+        axes[1, i].imshow(x_hat[0, i].reshape(28, 28), cmap='gray')
         axes[2, i].imshow(x_val_full[img_index, i].reshape(28, 28), cmap='gray')
         for j in range(2):
             axes[j, i].axis('off')
