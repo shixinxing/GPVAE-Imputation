@@ -27,25 +27,26 @@ flags.DEFINE_integer('window_size', 3, 'Window size for the inference CNN: Ignor
 flags.DEFINE_float('sigma', 1.0, 'Sigma value for the GP prior: Ignored if model_type is not gp-vae')
 flags.DEFINE_float('length_scale', 2.0, 'Length scale value for the GP prior: Ignored if model_type is not gp-vae')
 flags.DEFINE_float('beta', 0.8, 'Factor to weigh the KL term (similar to beta-VAE)')
-flags.DEFINE_integer('num_epochs', 20, 'Number of training epochs')
+flags.DEFINE_integer('num_epochs', 0, 'Number of training epochs')
 
 # Flags with common default values for all three datasets
 flags.DEFINE_float('learning_rate', 1e-3, 'Learning rate for training')
 flags.DEFINE_float('gradient_clip', 1e4, 'Maximum global gradient norm for the gradient clipping during training')
 flags.DEFINE_integer('print_epochs', 1, 'print epochs during training')
 flags.DEFINE_string('dataset', 'hmnist_random', 'Type of data to be trained on')
+flags.DEFINE_integer('timelength', 10, 'Total length of one series')
 flags.DEFINE_integer('seed', 1337, 'Seed for the random number generator')
-flags.DEFINE_enum('model_type', 'vae', ['vae', 'hi-vae', 'gp-vae'], 'Type of model to be trained')
+flags.DEFINE_enum('model_type', 'gp-vae', ['vae', 'hi-vae', 'gp-vae'], 'Type of model to be trained')
 
 flags.DEFINE_integer('cnn_kernel_size', 3, 'Kernel size for the CNN preprocessor')
 flags.DEFINE_list('cnn_sizes', [256], 'Number of filters for the layers of the CNN preprocessor')
-flags.DEFINE_boolean('save', False, 'save the results')
+flags.DEFINE_boolean('save', True, 'save the results')
 
-flags.DEFINE_boolean('banded_covar', False, 'Use a banded covariance matrix instead of a diagonal one for ' +
+flags.DEFINE_boolean('banded_covar', True, 'Use a banded covariance matrix instead of a diagonal one for ' +
                                            'the output of the inference network: Ignored if model_type is not gp-vae')
 flags.DEFINE_boolean('joint_encoder', False, 'Use a Conv1D Encoder to model q(z) with a diagonal covariance matrix')
 
-flags.DEFINE_integer('batch_size', 64, 'Batch size for training')
+flags.DEFINE_integer('batch_size', 50, 'Batch size for training')
 
 flags.DEFINE_integer('M', 1, 'Number of samples for ELBO estimation')
 flags.DEFINE_integer('K', 1, 'Number of importance sampling weights')
@@ -72,7 +73,7 @@ def main(argv):
     #############
 
     data_dir = f"data/hmnist/{FLAGS.dataset}.npz"
-    data_dim, time_length, img_shape, num_classes = 784, 10, (28, 28, 1), 10
+    data_dim, time_length, img_shape, num_classes = 784, FLAGS.timelength, (28, 28, 1), 10
     decoder = BernoulliDecoder
     data = np.load(data_dir)
     # [50000, 10, 28*28=784]
@@ -86,8 +87,6 @@ def main(argv):
 
     tf_x_train_miss = tf.data.Dataset.from_tensor_slices((x_train_miss, m_train_miss))\
                                      .shuffle(len(x_train_miss)).batch(FLAGS.batch_size).repeat()
-    tf_x_val_miss = tf.data.Dataset.from_tensor_slices((x_val_miss, m_val_miss)).batch(FLAGS.batch_size).repeat()
-    # tf_x_val_miss = tf.compat.v1.data.make_one_shot_iterator(tf_x_val_miss)
 
     # Build Conv2D preprocessor for image data
     print("Using CNN preprocessor in the encoder!\n")
@@ -149,15 +148,13 @@ def main(argv):
     # summary_writer = tf.contrib.summary.create_file_writer(outdir, flush_millis=10000)
 
     num_steps = FLAGS.num_epochs * len(x_train_miss) // FLAGS.batch_size
-    print_interval = num_steps // FLAGS.num_epochs
+    print_interval = num_steps // FLAGS.num_epochs if FLAGS.num_epochs > 0 else 1
 
     ############
     # Training #
     ############
 
     losses_train = []
-    losses_val = []
-
     s = time.time()
     t0 = time.time()
     # with summary_writer.as_default(), tf.contrib.summary.always_record_summaries():
@@ -224,32 +221,34 @@ def main(argv):
         x_val_imputed_copy[m_val_miss == 0] = x_val_miss[m_val_miss == 0]
         np.save(os.path.join(full_exp_name, "imputed_fill_observed_one"), x_val_imputed)
         everything_for_imgs = {
-            'y_test_full': x_val_full, 'y_test_miss': x_val_miss, 'y_rec': x_val_imputed,
+            # 'y_test_full': x_val_full, 'y_test_miss': x_val_miss,  # to save storage
+            'y_rec': x_val_imputed,
             'NLL': nll_miss, 'MSE': mse_miss, 'MSE_non_round': mse_miss_not_round
         }
         imgs_pickle_path = os.path.join(full_exp_name, 'everything_for_imgs.pkl')
         with open(imgs_pickle_path, 'wb') as f:
             pickle.dump(everything_for_imgs, f)
 
-    # Visualize reconstructions
-    img_index, num_imgs = 0, 10
-    fig, axes = plt.subplots(nrows=3, ncols=num_imgs, figsize=(2*num_imgs, 6))
+        # Visualize reconstructions
+        seq_indices, num_imgs = [i for i in range(2)], 10
+        fig, axes = plt.subplots(
+            nrows=3*len(seq_indices), ncols=num_imgs, figsize=(2*num_imgs, 2*3*len(seq_indices)), constrained_layout=True)
+        for i in range(len(seq_indices)):
+            for j in range(num_imgs):
+                axes[3*i, j].imshow(x_val_miss[seq_indices[i], j].reshape(28, 28), cmap='gray')
+                axes[3*i+1, j].imshow(x_val_imputed[seq_indices[i], j].reshape(28, 28), cmap='gray')
+                axes[3*i+2, j].imshow(x_val_full[seq_indices[i], j].reshape(28, 28), cmap='gray')
+                axes[3*i, j].axis('off')
+                axes[3*i+1, j].axis('off')
+                axes[3*i+2, j].axis('off')
 
-    x_hat = model.decode(model.encode(x_val_miss[img_index: img_index+1]).mean()).mean().numpy()
+        suptitle = FLAGS.model_type + f" reconstruction, MSE missing = {mse_miss}"
+        fig.suptitle(suptitle, size=18)
+        fig.savefig(
+            os.path.join(full_exp_name, f"{FLAGS.dataset}_{model.encoder.__class__.__name__}.pdf"), bbox_inches='tight')
 
-    for i in range(num_imgs):
-        axes[0, i].imshow(x_val_miss[img_index, i].reshape(28, 28), cmap='gray')
-        axes[1, i].imshow(x_hat[0, i].reshape(28, 28), cmap='gray')
-        axes[2, i].imshow(x_val_full[img_index, i].reshape(28, 28), cmap='gray')
-        for j in range(2):
-            axes[j, i].axis('off')
-
-    suptitle = FLAGS.model_type + f" reconstruction, MSE missing = {mse_miss}"
-    fig.suptitle(suptitle, size=18)
-    fig.savefig(os.path.join(full_exp_name, f"{FLAGS.dataset}_{model.encoder.__class__.__name__}.pdf"))
-
-    print("Evaluation finished. Results are saved at:")
-    print(f"{full_exp_name}")
+        print("Evaluation finished. Results are saved at:")
+        print(f"{full_exp_name}")
 
 
 if __name__ == '__main__':
